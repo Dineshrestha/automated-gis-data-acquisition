@@ -72,6 +72,12 @@ The tool accepts a point, line, or polygon study area and allows the analyst to 
 
 ## Tool interface
 
+<p align="center">
+  <img src="docs/images/automated_gis_data_acquisition_tool_interface.png"
+       alt="Automated GIS Data Acquisition toolbox interface in ArcGIS Pro"
+       width="420">
+</p>
+
 The master tool is designed around a simple workflow:
 
 ```text
