@@ -68,6 +68,10 @@ from automated_gis_data_acquisition.core.projection import (
     project_feature_class,
 )
 
+from automated_gis_data_acquisition.core.batching import (
+    adaptive_download,
+)
+
 
 FEMA_LAYER_URL = "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28"
 FEMA_QUERY_URL = FEMA_LAYER_URL + "/query"
@@ -383,29 +387,30 @@ class DownloadFEMAFloodplain(object):
                     parameters[9].value = summary_output
                 return
 
-            # Download features in adaptive batches. Large or geometrically complex
-            # FEMA records can make ArcGIS Server return a generic 500 even when the
-            # record count is below maxRecordCount. Failed batches are automatically
-            # split into smaller chunks until they succeed.
+            # Download features using the shared adaptive batching engine.
+            # FEMA-specific REST request/response handling stays here, while the
+            # generic split-and-retry strategy lives in core/batching.py.
             batch_fcs = []
-            initial_batches = [
-                object_ids[i:i + batch_size]
-                for i in range(0, len(object_ids), batch_size)
-            ]
+
+            initial_batch_count = (
+                (len(object_ids) + batch_size - 1) // batch_size
+            )
+
             arcpy.AddMessage(
-                "Downloading {} candidate FEMA features in {} initial batches (up to {} IDs each)...".format(
-                    len(object_ids), len(initial_batches), batch_size
+                "Downloading {} candidate FEMA features in {} initial batches "
+                "(up to {} IDs each) using shared adaptive batching...".format(
+                    len(object_ids),
+                    initial_batch_count,
+                    batch_size,
                 )
             )
 
             download_counter = [0]
 
-            def download_ids(ids, label):
+            def download_fema_batch(ids):
                 if not ids:
-                    return
-                arcpy.AddMessage(
-                    "Downloading {} ({} features)...".format(label, len(ids))
-                )
+                    return None
+
                 response = _request_json(
                     FEMA_QUERY_URL,
                     {
@@ -423,45 +428,108 @@ class DownloadFEMAFloodplain(object):
                 )
 
                 if "error" in response:
-                    if len(ids) > MIN_BATCH_SIZE:
-                        midpoint = len(ids) // 2
-                        left = ids[:midpoint]
-                        right = ids[midpoint:]
-                        arcpy.AddWarning(
-                            "FEMA rejected {} ({} IDs): {}. Retrying as {} + {} IDs.".format(
-                                label, len(ids), _arcgis_error_text(response["error"]),
-                                len(left), len(right)
-                            )
-                        )
-                        download_ids(left, label + "A")
-                        download_ids(right, label + "B")
-                        return
                     raise RuntimeError(
                         "{} | ObjectIDs: {}".format(
                             _arcgis_error_text(response["error"]),
-                            ",".join(map(str, ids))
+                            ",".join(map(str, ids)),
                         )
                     )
 
                 download_counter[0] += 1
                 n = download_counter[0]
+
                 json_path = os.path.join(
-                    scratch_folder, "fema_{}_{:04d}.json".format(run_id, n)
+                    scratch_folder,
+                    "fema_{}_{:04d}.json".format(
+                        run_id,
+                        n,
+                    ),
                 )
                 temp_items.append(json_path)
-                with open(json_path, "w", encoding="utf-8") as f:
+
+                with open(
+                    json_path,
+                    "w",
+                    encoding="utf-8",
+                ) as f:
                     json.dump(response, f)
 
-                batch_fc = tmp_fc("FEMA_Batch_{:04d}".format(n))
-                arcpy.conversion.JSONToFeatures(json_path, batch_fc, "POLYGON")
-                if int(arcpy.management.GetCount(batch_fc)[0]) > 0:
+                batch_fc = tmp_fc(
+                    "FEMA_Batch_{:04d}".format(n)
+                )
+
+                arcpy.conversion.JSONToFeatures(
+                    json_path,
+                    batch_fc,
+                    "POLYGON",
+                )
+
+                if int(
+                    arcpy.management.GetCount(
+                        batch_fc
+                    )[0]
+                ) > 0:
                     batch_fcs.append(batch_fc)
 
-            for idx, ids in enumerate(initial_batches, 1):
-                arcpy.SetProgressorLabel(
-                    "Downloading FEMA initial batch {} of {}...".format(idx, len(initial_batches))
-                )
-                download_ids(ids, "batch {} of {}".format(idx, len(initial_batches)))
+                return batch_fc
+
+            def batching_progress(event, payload):
+                size = payload.get("size", 0)
+
+                if event == "batch_start":
+                    arcpy.SetProgressorLabel(
+                        "Downloading FEMA batch attempt "
+                        "({} features)...".format(size)
+                    )
+
+                elif event == "batch_split":
+                    arcpy.AddWarning(
+                        "FEMA rejected a batch of {} IDs: {}. "
+                        "Retrying as {} + {} IDs.".format(
+                            payload.get(
+                                "original_size",
+                                size,
+                            ),
+                            payload.get(
+                                "error",
+                                "Unknown REST error",
+                            ),
+                            payload.get(
+                                "left_size",
+                                0,
+                            ),
+                            payload.get(
+                                "right_size",
+                                0,
+                            ),
+                        )
+                    )
+
+                elif event == "batch_success":
+                    arcpy.AddMessage(
+                        "FEMA batch succeeded "
+                        "({} features).".format(size)
+                    )
+
+                elif event == "batch_failed":
+                    arcpy.AddError(
+                        "FEMA batch failed at minimum "
+                        "batch size ({} IDs): {}".format(
+                            size,
+                            payload.get(
+                                "error",
+                                "Unknown REST error",
+                            ),
+                        )
+                    )
+
+            adaptive_download(
+                items=object_ids,
+                downloader=download_fema_batch,
+                initial_batch_size=batch_size,
+                minimum_batch_size=MIN_BATCH_SIZE,
+                on_progress=batching_progress,
+            )
 
             arcpy.ResetProgressor()
             if not batch_fcs:
