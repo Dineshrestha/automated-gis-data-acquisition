@@ -1,135 +1,228 @@
 # Automated GIS Data Acquisition
 
-> Turn a project study area into a project-ready GIS data package by automating data discovery, acquisition, clipping, standardization, QA, and documentation.
+> Turn a project study area into a project-ready GIS data package by automating acquisition, clipping, projection, standardization, logging, and delivery of authoritative public GIS datasets.
 
 [![ArcGIS Pro](https://img.shields.io/badge/ArcGIS%20Pro-Python%20Toolbox-blue)](https://www.esri.com/en-us/arcgis/products/arcgis-pro/overview)
 [![Python](https://img.shields.io/badge/Python-3.x-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-## Why this project exists
+## Overview
 
-Environmental and infrastructure GIS projects repeatedly require analysts to visit multiple public-data portals, identify the correct dataset, download it, extract it, project it, clip it to a study area, clean the output, and document where it came from.
+Environmental and infrastructure GIS projects repeatedly require analysts to visit multiple public-data portals, locate the correct dataset, download it, clip it to a study area, project it, organize the outputs, and document what was acquired.
 
-That workflow is manageable once. Repeating it across dozens or hundreds of projects is slow, inconsistent, and difficult to audit.
+**Automated GIS Data Acquisition** consolidates that workflow into a single ArcGIS Pro Python toolbox.
 
-**Automated GIS Data Acquisition** is being built as a modular ArcGIS Pro/Python framework that reduces that workflow to a study area plus a set of requested datasets.
+## Workflow at a glance
+
+![Automated GIS Data Acquisition Workflow](docs/images/automated_gis_data_acquisition_workflow.png)
 
 ```text
 Study Area
     |
     v
-Determine geography / AOI
+Prepare / Buffer AOI
     |
     v
-Connect to authoritative public sources
+Connect to public GIS services
+    |
+    +--> FEMA Floodplain
+    +--> NWI Wetlands
+    +--> NHD Hydrography
+    +--> NLCD Land Cover
+    +--> USGS 3DEP Elevation
+    +--> USGS DEM 10 m
+    +--> Census Boundaries
+    +--> USDA Cropland Data Layer
     |
     v
-Download relevant GIS data
-    |
-    v
-Clip / project / standardize
-    |
-    v
-QA + provenance metadata
+Clip / Project / Standardize
     |
     v
 Project_Environmental_Data.gdb
+    |
+    `--> Data_Acquisition_Log
 ```
 
-## Project status
+## Current toolbox
 
-The project is being developed incrementally. The first production module is the existing **FEMA Floodplain Downloader v1.1**, which has already been tested against both small study areas and a much larger transmission-corridor AOI.
-
-| Provider | Dataset | Status |
-|---|---|---|
-| FEMA | National Flood Hazard Layer / Flood Hazard Zones | **Working — v1.1** |
-| USFWS | National Wetlands Inventory (NWI) | Planned |
-| USGS | National Hydrography / hydrography | Planned |
-| USGS | NLCD Land Cover | Planned |
-| USGS | Elevation / DEM | Planned |
-| U.S. Census Bureau | Administrative boundaries | Planned |
-| USDA | Cropland Data Layer (CDL) | Planned |
-| EPA | Environmental datasets | Future |
-| State GIS portals | State-specific datasets | Future |
-| County sources | Parcels and local data | Future / advanced |
-
-## Current working module: FEMA Floodplain Downloader v1.1
-
-The FEMA module downloads FEMA National Flood Hazard Layer (NFHL) Flood Hazard Zones that intersect a user-supplied study area.
-
-Current capabilities include:
-
-- Polygon, polyline, point, or multipoint study-area input
-- Optional AOI buffer
-- FEMA NFHL REST-service acquisition
-- Actual-AOI spatial query before falling back to an envelope
-- ObjectID batching to handle REST record limits
-- Adaptive batch splitting for server failures
-- Retry handling for transient FEMA/ArcGIS Server errors
-- Flood-hazard filtering
-- Exact local clipping to the AOI
-- Output projection back to the study-area coordinate system
-- Geometry repair
-- Optional flood-zone summary table
-- Optional add-to-map behavior in ArcGIS Pro
-
-The large-corridor improvements in v1.1 were added after a smaller-area workflow succeeded but a much larger corridor AOI exposed REST/server limitations. The solution now queries the actual AOI where possible, reduces batch size, retries transient failures, and recursively splits rejected batches.
-
-## Target product
-
-The long-term ArcGIS Pro tool will use one study area and allow the analyst to choose the datasets required for the project.
+The master toolbox is:
 
 ```text
-Input:
-    StudyArea.shp
-
-Datasets:
-    [x] FEMA Floodplain
-    [ ] NWI Wetlands
-    [ ] NHD Hydrography
-    [ ] NLCD Land Cover
-    [ ] USGS Elevation
-    [ ] Census Boundaries
-    [ ] USDA Agriculture
-
-Output:
-    Project_Environmental_Data.gdb
+toolboxes/Automated_GIS_Data_Acquisition.pyt
 ```
 
-A future project geodatabase may contain outputs such as:
+The tool accepts a point, line, or polygon study area and allows the analyst to select which datasets to acquire.
+
+### Available datasets
+
+| Provider | Dataset | Toolbox support |
+|---|---|---|
+| FEMA | NFHL Flood Hazard Zones | ✅ Available |
+| USFWS | National Wetlands Inventory (NWI) | ✅ Available |
+| USGS | NHD Hydrography - Flowlines | ✅ Available |
+| USGS | NHD Hydrography - Waterbodies | ✅ Available |
+| USGS | NLCD Land Cover | ✅ Available |
+| USGS | 3DEP Elevation | ✅ Available |
+| USGS | 3DEP DEM 10 m | ✅ Available |
+| U.S. Census Bureau | State boundaries | ✅ Available |
+| U.S. Census Bureau | County boundaries | ✅ Available |
+| USDA NASS | Cropland Data Layer (CDL) | ✅ Available |
+
+> The project is actively being tested and refined. Dataset services can change over time, so provider-specific adjustments may be required as public endpoints evolve.
+
+## Tool interface
+
+The master tool is designed around a simple workflow:
+
+```text
+Study Area:
+[ StudyArea.shp ]
+
+Buffer Distance:
+[ 0 Miles ]
+
+Output Folder:
+[ C:\Projects\Project01\Data ]
+
+Output Geodatabase:
+[ Project_Environmental_Data.gdb ]
+
+Datasets:
+[x] FEMA Floodplain
+[x] NWI Wetlands
+[x] NHD Hydrography
+[x] NLCD Land Cover
+[x] USGS Elevation
+[x] USGS DEM 10 m
+[x] Census Boundaries
+[x] USDA Agriculture / CDL
+
+[ RUN ]
+```
+
+## Output
+
+A typical run produces:
 
 ```text
 Project_Environmental_Data.gdb
 |
-|-- FEMA_Flood_Hazard
+|-- FEMA_Floodplain
 |-- NWI_Wetlands
 |-- NHD_Flowline
 |-- NHD_Waterbody
-|-- NLCD_LandCover
-|-- USDA_CDL
-|-- USGS_DEM
+|-- NLCD_LandCover_2024
+|-- USGS_3DEP_Elevation
+|-- USGS_DEM_10m
+|-- Census_States
 |-- Census_Counties
+|-- USDA_CDL_2025
 `-- Data_Acquisition_Log
 ```
 
-## Design goals
+## Core capabilities
 
-The framework is intended to be more than a collection of download scripts. The core design goals are:
+- Point, polyline, or polygon study-area input
+- Optional AOI buffering
+- File geodatabase creation
+- Multi-provider data acquisition
+- ArcGIS REST vector querying
+- ObjectID batching
+- Adaptive batch splitting for large/complex requests
+- Retry handling for transient web-service failures
+- Exact AOI clipping
+- Projection back to the study-area coordinate system
+- Raster acquisition from ArcGIS ImageServer services
+- DEM / raster clipping and reprojection
+- Dedicated 10 m DEM output
+- Failure isolation between providers
+- Optional add-to-map behavior
+- Acquisition log with success/failure, output path, runtime, and message
 
-1. **Modular providers** — each public data source is implemented independently.
-2. **Reusable AOI processing** — dissolve, buffer, project, subdivide, and validate once.
-3. **Large-AOI resilience** — batching, retry logic, tiling/subdivision, and graceful recovery.
-4. **Consistent outputs** — predictable names, coordinate systems, schemas, and geodatabase organization.
-5. **Data provenance** — preserve the source, acquisition date, dataset vintage, processing steps, and tool version.
-6. **QA before delivery** — detect empty outputs, invalid geometry, spatial-reference issues, duplicates, and failed downloads.
-7. **Failure isolation** — one unavailable provider should not necessarily terminate an entire multi-dataset run.
+## Large-AOI resilience
 
-## Repository architecture
+The original FEMA module was tested against a large transmission-corridor AOI after smaller-area workflows exposed REST-service limitations.
+
+The toolbox includes adaptive batching:
+
+```text
+500 IDs
+   |
+   v
+Request succeeds?
+   |
+   +-- Yes --> continue
+   |
+   `-- No
+        |
+        v
+      Split
+    250 + 250
+        |
+        v
+      Retry
+```
+
+Failed batches are recursively subdivided until they succeed or reach the configured minimum batch size.
+
+## Raster handling
+
+Raster datasets are acquired from public ArcGIS ImageServer services.
+
+For elevation and land-cover datasets, the workflow is:
+
+```text
+Image Service
+     |
+     v
+Server-side source mosaic
+     |
+     v
+Clip to AOI
+     |
+     v
+Project to study-area CRS
+     |
+     v
+Single output raster
+```
+
+The dedicated **USGS DEM 10 m** option targets an approximately 10-meter output cell size and converts that distance into the study-area coordinate system's map units when necessary.
+
+## FEMA module
+
+The original FEMA-specific toolbox remains available under:
+
+```text
+toolboxes/fema/FEMA_Floodplain_Downloader.pyt
+```
+
+It includes:
+
+- FEMA NFHL REST acquisition
+- actual-AOI spatial querying
+- ObjectID batching
+- adaptive batch splitting
+- retry handling
+- flood-hazard filtering
+- exact clipping
+- output projection
+- geometry repair
+- optional summary table
+
+The standalone FEMA module remains useful for FEMA-only workflows and as the first production provider used to build the broader acquisition framework.
+
+## Repository structure
 
 ```text
 automated-gis-data-acquisition/
 |
+|-- docs/
+|   `-- images/
+|       `-- automated_gis_data_acquisition_workflow.png
+|
 |-- toolboxes/
+|   |-- Automated_GIS_Data_Acquisition.pyt
 |   `-- fema/
 |       |-- FEMA_Floodplain_Downloader.pyt
 |       `-- FEMA_Floodplain_Downloader_README_v1_1.txt
@@ -137,9 +230,17 @@ automated-gis-data-acquisition/
 |-- src/
 |   `-- automated_gis_data_acquisition/
 |       |-- core/
+|       |   |-- aoi.py
+|       |   |-- batching.py
+|       |   |-- geometry.py
+|       |   |-- projection.py
+|       |   |-- rest_client.py
+|       |   |-- schema.py
+|       |   `-- temp.py
+|       |
 |       `-- providers/
+|           `-- fema.py
 |
-|-- docs/
 |-- examples/
 |-- tests/
 |-- CHANGELOG.md
@@ -147,83 +248,78 @@ automated-gis-data-acquisition/
 `-- .gitignore
 ```
 
-The current working FEMA toolbox remains intact under `toolboxes/fema/` while its reusable acquisition logic is progressively refactored into `src/`.
+## Installation
 
-## Standardized provenance attributes — planned
+1. Clone or download this repository.
+2. Open **ArcGIS Pro**.
+3. Open the **Catalog** pane.
+4. Right-click **Toolboxes**.
+5. Choose **Add Toolbox**.
+6. Browse to:
 
-Where appropriate, vector outputs will eventually carry standardized acquisition metadata such as:
+```text
+toolboxes/Automated_GIS_Data_Acquisition.pyt
+```
 
-| Field | Purpose |
-|---|---|
-| `DATASET` | Standard dataset name |
-| `SOURCE` | Source/provider name |
-| `AGENCY` | Publishing agency |
-| `SOURCE_URL` | Source service or download location |
-| `DOWNLOAD_DT` | Acquisition date |
-| `SOURCE_DT` | Dataset vintage/date where available |
-| `AOI_NAME` | Project/study-area identifier |
-| `ORIG_CRS` | Original coordinate system |
-| `OUTPUT_CRS` | Delivered coordinate system |
-| `PROCESSING` | Clip/project/mosaic/etc. |
-| `TOOL_VER` | Tool version used |
+7. Open **Automated GIS Data Acquisition**.
+8. Select a study area.
+9. Choose an optional buffer.
+10. Select the datasets to download.
+11. Choose an output folder and geodatabase name.
+12. Run the tool.
 
-A `Data_Acquisition_Log` table is also planned so a project package can document successes, failures, source information, feature counts, processing, and runtime.
+## Recommended testing sequence
 
-## Roadmap
+When testing a new environment or provider update, start with a small AOI.
 
-### Phase 1 — Foundation
+### Vector test
 
-- [x] FEMA Floodplain Downloader v1.1
-- [x] Large-corridor FEMA query/batching improvements
-- [x] Establish standalone GitHub repository
-- [ ] Refactor shared AOI/download logic into reusable core modules
-- [ ] Add standardized logging and provenance model
+```text
+[x] FEMA Floodplain
+[x] NWI Wetlands
+[x] Census Boundaries
+```
 
-### Phase 2 — Core environmental providers
+### Raster / hydrography test
 
-- [ ] NWI Wetlands
-- [ ] NHD / hydrography
-- [ ] USGS Elevation
+```text
+[x] NHD Hydrography
+[x] NLCD Land Cover
+[x] USGS DEM 10 m
+[x] USDA Cropland Data Layer
+```
 
-### Phase 3 — Land cover and administrative data
+Then test larger project areas after the small-AOI workflow succeeds.
 
-- [ ] NLCD Land Cover
-- [ ] USDA Cropland Data Layer
-- [ ] Census boundaries
+## Development direction
 
-### Phase 4 — Production framework
+Near-term priorities:
 
-- [ ] Multi-provider ArcGIS Pro toolbox UI
-- [ ] Dataset checkboxes and provider-specific options
-- [ ] Acquisition log
-- [ ] Standard metadata fields
-- [ ] QA report
-- [ ] Failure isolation and provider status summary
-- [ ] Large-AOI subdivision/tiling engine
+- [x] FEMA Floodplain
+- [x] NWI Wetlands
+- [x] NHD Hydrography
+- [x] NLCD Land Cover
+- [x] USGS 3DEP Elevation
+- [x] USGS DEM 10 m
+- [x] Census Boundaries
+- [x] USDA Cropland Data Layer
+- [x] Multi-provider ArcGIS Pro toolbox
+- [x] Acquisition log
+- [x] Provider failure isolation
+- [ ] Expanded QA reporting
+- [ ] Standardized provenance fields
+- [ ] Large-raster tiling / local mosaic fallback
+- [ ] Provider-specific options and filters
+- [ ] Automated tests
+- [ ] Additional EPA / state / county data providers
 
-## Requirements
+## Author
 
-The current FEMA toolbox is designed for:
-
-- ArcGIS Pro
-- Python 3 / ArcPy
-- Internet access to the FEMA NFHL ArcGIS REST service
-
-The FEMA module uses Python's standard library for web requests and does not currently require a third-party HTTP package.
-
-## Install the current FEMA module
-
-1. Download or clone this repository.
-2. In ArcGIS Pro, open the Catalog pane.
-3. Right-click **Toolboxes** and choose **Add Toolbox**.
-4. Browse to `toolboxes/fema/FEMA_Floodplain_Downloader.pyt`.
-5. Open **Download FEMA Floodplain**.
-6. Select the study area, optional buffer, flood-hazard filter, and output geodatabase.
-7. Run the tool.
-
-## Repository direction
-
-This repository is intentionally being built in public as a GIS-development portfolio project. Working provider modules will be added incrementally rather than marking planned datasets as complete before they are implemented and tested.
+**Dinesh Shrestha**  
+GIS Automation & Spatial Analysis Consultant  
+ArcGIS Pro • Python • ArcPy • Data Engineering  
+Email: dinesh.shrestha015@gmail.com  
+Portfolio: dineshrestha.github.io
 
 ## License
 
