@@ -14,7 +14,7 @@ Environmental and infrastructure GIS projects repeatedly require analysts to vis
 
 ## Workflow at a glance
 
-![Automated GIS Data Acquisition Workflow](docs/images/automated_gis_data_acquisition_workflow.png)
+![Automated GIS Data Acquisition](docs/images/automated_gis_data_acquisition_banner.png)
 
 ```text
 Study Area
