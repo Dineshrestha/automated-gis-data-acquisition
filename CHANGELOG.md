@@ -19,3 +19,11 @@ All notable project changes will be documented here.
 - Increased feature-download timeout to 240 seconds.
 - Suppressed Z/M geometry in REST responses to reduce payload size.
 - Added automatic envelope fallback for unusually complex AOIs.
+
+## v1.3
+
+- Added actual-AOI spatial queries for NHD Flowlines
+- Reduced NHD Flowline starting batch size from 500 to 125
+- Added envelope-query fallback
+- Eliminated repeated 504 timeout splitting in the tested 10-mile B2H run
+- NHD test completed successfully in 3m 57s
