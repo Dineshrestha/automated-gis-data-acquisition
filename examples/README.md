@@ -1,5 +1,10 @@
 # Examples
 
-Example workflows and small, redistributable test AOIs will be added here as providers are implemented.
+Use this folder for screenshots, sample outputs, benchmark notes, and future demonstration datasets.
 
-Large client/project datasets should not be committed to this public repository.
+Recommended examples:
+- Small local AOI with FEMA + NWI
+- B2H-style 10-mile NHD benchmark
+- B2H-style 20-mile 3DEP tiling benchmark
+- Example `Data_Acquisition_Report.html`
+- Example `Data_Acquisition_Manifest.csv`

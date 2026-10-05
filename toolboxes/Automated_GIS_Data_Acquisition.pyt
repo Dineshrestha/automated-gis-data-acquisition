@@ -6,6 +6,8 @@
 # email: dinesh.shrestha015@gmail.com
 # Portfolio: dineshrestha.github.io
 # -----------------------------------------------------------------------------
+
+VERSION = "1.5.0"
 """
 Automated GIS Data Acquisition
 ArcGIS Pro Python Toolbox
@@ -36,11 +38,17 @@ Design goals:
     - Exact AOI clipping
     - Output projection matching the study area
     - Failure isolation: one failed source does not stop the entire run
+    - Automatic raster tiling + mosaic fallback for ImageServer size limits
+    - NHD Flowline optimization: actual-AOI query + 125-ID starting batches
     - Acquisition log written to the output geodatabase
+    - Dataset-level provenance and automated output QA metadata
+    - Automatic HTML QA report and CSV acquisition manifest
 """
 
 import arcpy
+import csv
 import datetime
+import html
 import json
 import os
 import time
@@ -96,6 +104,7 @@ USDA_CDL_URL = (
 
 
 VECTOR_BATCH_SIZE = 500
+NHD_FLOWLINE_BATCH_SIZE = 125
 MIN_VECTOR_BATCH_SIZE = 10
 WEB_MERCATOR = 3857
 FEMA_WKID = 4269
@@ -384,6 +393,8 @@ class AutomatedGISDataAcquisition(object):
                         output_fc=os.path.join(output_gdb, "NHD_Flowline"),
                         tmp_fc=tmp_fc,
                         temp_items=temp_items,
+                        initial_batch_size=NHD_FLOWLINE_BATCH_SIZE,
+                        use_actual_aoi_query=True,
                     ),
                     outputs,
                 )
@@ -533,19 +544,35 @@ class AutomatedGISDataAcquisition(object):
                 output_gdb,
                 "Data_Acquisition_Log",
             )
-            _write_log(log_table, log_rows)
+            _write_log(log_table, log_rows, run_id)
+
+            report_html, manifest_csv = _write_run_reports(
+                output_folder=output_folder,
+                output_gdb=output_gdb,
+                run_id=run_id,
+                study_area=study_area,
+                buffer_distance=buffer_distance,
+                rows=log_rows,
+            )
 
             if add_to_map:
                 _add_outputs_to_map(outputs, log_table)
 
             success_count = sum(1 for r in log_rows if r["status"] == "SUCCESS")
             failed_count = sum(1 for r in log_rows if r["status"] == "FAILED")
+            qa_warning_count = sum(1 for r in log_rows if r["qa_status"] == "WARN")
+            qa_failed_count = sum(1 for r in log_rows if r["qa_status"] == "FAIL")
 
             arcpy.AddMessage("")
             arcpy.AddMessage("=" * 72)
             arcpy.AddMessage("DOWNLOAD COMPLETE")
             arcpy.AddMessage("Successful datasets: {}".format(success_count))
             arcpy.AddMessage("Failed datasets: {}".format(failed_count))
+            arcpy.AddMessage("QA warnings: {}".format(qa_warning_count))
+            arcpy.AddMessage("QA failures: {}".format(qa_failed_count))
+            arcpy.AddMessage("Provenance/QA table: Data_Acquisition_Log")
+            arcpy.AddMessage("QA report: {}".format(report_html))
+            arcpy.AddMessage("Acquisition manifest: {}".format(manifest_csv))
             arcpy.AddMessage("Output: {}".format(output_gdb))
             arcpy.AddMessage("=" * 72)
 
@@ -707,6 +734,8 @@ def _download_vector_service(
     output_fc,
     tmp_fc,
     temp_items,
+    initial_batch_size=VECTOR_BATCH_SIZE,
+    use_actual_aoi_query=False,
 ):
     arcpy.AddMessage("")
     arcpy.AddMessage("[{}]".format(label))
@@ -725,20 +754,62 @@ def _download_vector_service(
 
     query_url = layer_url.rstrip("/") + "/query"
 
-    ids_response = _post_json(
-        query_url,
-        {
-            "f": "json",
-            "where": "1=1",
-            "geometry": _extent_json(aoi_service),
-            "geometryType": "esriGeometryEnvelope",
-            "inSR": str(service_wkid),
-            "spatialRel": "esriSpatialRelIntersects",
-            "returnIdsOnly": "true",
-        },
-        timeout=180,
-        retries=5,
-    )
+    ids_response = None
+
+    if use_actual_aoi_query:
+        try:
+            with arcpy.da.SearchCursor(
+                aoi_service,
+                ["SHAPE@JSON"],
+            ) as cursor:
+                aoi_json = next(cursor)[0]
+
+            arcpy.AddMessage(
+                "{}: querying candidates with actual AOI geometry...".format(label)
+            )
+
+            ids_response = _post_json(
+                query_url,
+                {
+                    "f": "json",
+                    "where": "1=1",
+                    "geometry": aoi_json,
+                    "geometryType": "esriGeometryPolygon",
+                    "inSR": str(service_wkid),
+                    "spatialRel": "esriSpatialRelIntersects",
+                    "returnIdsOnly": "true",
+                },
+                timeout=180,
+                retries=5,
+            )
+
+            if "error" in ids_response:
+                raise RuntimeError(_arcgis_error(ids_response))
+
+        except Exception as exc:
+            arcpy.AddWarning(
+                "{} actual-AOI query failed. Falling back to envelope query. {}".format(
+                    label,
+                    exc,
+                )
+            )
+            ids_response = None
+
+    if ids_response is None:
+        ids_response = _post_json(
+            query_url,
+            {
+                "f": "json",
+                "where": "1=1",
+                "geometry": _extent_json(aoi_service),
+                "geometryType": "esriGeometryEnvelope",
+                "inSR": str(service_wkid),
+                "spatialRel": "esriSpatialRelIntersects",
+                "returnIdsOnly": "true",
+            },
+            timeout=180,
+            retries=5,
+        )
 
     if "error" in ids_response:
         raise RuntimeError(_arcgis_error(ids_response))
@@ -812,7 +883,14 @@ def _download_vector_service(
 
         return batch_fc
 
-    for initial in _chunks(object_ids, VECTOR_BATCH_SIZE):
+    arcpy.AddMessage(
+        "{} initial download batch size: {} IDs.".format(
+            label,
+            initial_batch_size,
+        )
+    )
+
+    for initial in _chunks(object_ids, initial_batch_size):
         _adaptive_batch(
             initial,
             download_batch,
@@ -1023,6 +1101,17 @@ def _download_image_service(
     cell_size=None,
     resampling="NEAREST",
 ):
+    """
+    Download an ArcGIS ImageServer raster to the AOI.
+
+    The function first attempts a single clip. If the image service rejects
+    the request because its row/column export limit is exceeded, the AOI is
+    automatically subdivided into smaller tiles. Each tile is downloaded
+    separately, then mosaicked and projected to the Study Area CRS.
+
+    This makes large-corridor projects resilient to ImageServer export limits
+    such as USGS 3DEP's 8000 x 8000 maximum export size.
+    """
     arcpy.AddMessage("")
     arcpy.AddMessage("[{}]".format(label))
 
@@ -1039,9 +1128,7 @@ def _download_image_service(
     if where_clause:
         kwargs["where_clause"] = where_clause
 
-    arcpy.AddMessage(
-        "Connecting to image service..."
-    )
+    arcpy.AddMessage("Connecting to image service...")
 
     try:
         arcpy.management.MakeImageServerLayer(
@@ -1050,8 +1137,6 @@ def _download_image_service(
             **kwargs
         )
     except TypeError:
-        # Compatibility fallback for ArcGIS Pro builds that do not accept
-        # keyword arguments for all optional MakeImageServerLayer parameters.
         arcpy.management.MakeImageServerLayer(
             image_url,
             layer_name,
@@ -1065,33 +1150,266 @@ def _download_image_service(
             where_clause if where_clause else "#",
         )
 
-    temp_clip = os.path.join(
-        arcpy.env.scratchGDB,
-        "{}_CLIP_{}".format(
-            _safe_name(label),
-            uuid.uuid4().hex[:6],
-        ),
+    local_temp_items = []
+
+    def register(path):
+        local_temp_items.append(path)
+        return path
+
+    def delete_if_exists(path):
+        try:
+            if arcpy.Exists(path):
+                arcpy.management.Delete(path)
+        except Exception:
+            pass
+
+    def is_size_limit_error(exc):
+        message = str(exc).lower()
+        return (
+            "size limits of the image service" in message
+            or "maximum number of rows and columns" in message
+            or "8000 and 8000" in message
+            or "exceeds the maximum" in message
+        )
+
+    def rectangle_fc(extent, spatial_reference, name):
+        path = register(
+            os.path.join(
+                arcpy.env.scratchGDB,
+                "{}_{}_{}".format(
+                    _safe_name(label),
+                    name,
+                    uuid.uuid4().hex[:6],
+                ),
+            )
+        )
+
+        array = arcpy.Array([
+            arcpy.Point(extent.XMin, extent.YMin),
+            arcpy.Point(extent.XMin, extent.YMax),
+            arcpy.Point(extent.XMax, extent.YMax),
+            arcpy.Point(extent.XMax, extent.YMin),
+            arcpy.Point(extent.XMin, extent.YMin),
+        ])
+
+        polygon = arcpy.Polygon(
+            array,
+            spatial_reference,
+        )
+
+        arcpy.management.CopyFeatures(
+            [polygon],
+            path,
+        )
+
+        return path
+
+    def split_extent(extent):
+        mid_x = (extent.XMin + extent.XMax) / 2.0
+        mid_y = (extent.YMin + extent.YMax) / 2.0
+
+        return [
+            arcpy.Extent(
+                extent.XMin,
+                extent.YMin,
+                mid_x,
+                mid_y,
+            ),
+            arcpy.Extent(
+                mid_x,
+                extent.YMin,
+                extent.XMax,
+                mid_y,
+            ),
+            arcpy.Extent(
+                extent.XMin,
+                mid_y,
+                mid_x,
+                extent.YMax,
+            ),
+            arcpy.Extent(
+                mid_x,
+                mid_y,
+                extent.XMax,
+                extent.YMax,
+            ),
+        ]
+
+    def clip_tile(extent, depth=0, max_depth=8):
+        tile_rect = rectangle_fc(
+            extent,
+            input_sr,
+            "RECT_D{}".format(depth),
+        )
+
+        tile_aoi = register(
+            os.path.join(
+                arcpy.env.scratchGDB,
+                "{}_AOI_D{}_{}".format(
+                    _safe_name(label),
+                    depth,
+                    uuid.uuid4().hex[:6],
+                ),
+            )
+        )
+
+        arcpy.analysis.PairwiseClip(
+            aoi_native,
+            tile_rect,
+            tile_aoi,
+        )
+
+        if int(arcpy.management.GetCount(tile_aoi)[0]) == 0:
+            return []
+
+        tile_raster = register(
+            os.path.join(
+                arcpy.env.scratchGDB,
+                "{}_TILE_D{}_{}".format(
+                    _safe_name(label),
+                    depth,
+                    uuid.uuid4().hex[:6],
+                ),
+            )
+        )
+
+        try:
+            arcpy.management.Clip(
+                layer_name,
+                "#",
+                tile_raster,
+                tile_aoi,
+                "#",
+                "ClippingGeometry",
+                "NO_MAINTAIN_EXTENT",
+            )
+
+            arcpy.AddMessage(
+                "{} tile downloaded (level {}).".format(
+                    label,
+                    depth,
+                )
+            )
+
+            return [tile_raster]
+
+        except Exception as exc:
+            delete_if_exists(tile_raster)
+
+            if not is_size_limit_error(exc) or depth >= max_depth:
+                raise
+
+            arcpy.AddWarning(
+                "{} tile exceeded image-service size limits. "
+                "Subdividing level {} tile into four smaller tiles...".format(
+                    label,
+                    depth,
+                )
+            )
+
+            rasters = []
+
+            for child_extent in split_extent(extent):
+                rasters.extend(
+                    clip_tile(
+                        child_extent,
+                        depth=depth + 1,
+                        max_depth=max_depth,
+                    )
+                )
+
+            return rasters
+
+    temp_clip = register(
+        os.path.join(
+            arcpy.env.scratchGDB,
+            "{}_CLIP_{}".format(
+                _safe_name(label),
+                uuid.uuid4().hex[:6],
+            ),
+        )
     )
 
-    try:
-        arcpy.AddMessage(
-            "Clipping image service to AOI..."
-        )
+    source_raster = None
 
-        arcpy.management.Clip(
-            layer_name,
-            "#",
-            temp_clip,
-            aoi_native,
-            "#",
-            "ClippingGeometry",
-            "NO_MAINTAIN_EXTENT",
-        )
+    try:
+        arcpy.AddMessage("Clipping image service to AOI...")
+
+        try:
+            arcpy.management.Clip(
+                layer_name,
+                "#",
+                temp_clip,
+                aoi_native,
+                "#",
+                "ClippingGeometry",
+                "NO_MAINTAIN_EXTENT",
+            )
+
+            source_raster = temp_clip
+
+        except Exception as exc:
+            if not is_size_limit_error(exc):
+                raise
+
+            delete_if_exists(temp_clip)
+
+            arcpy.AddWarning(
+                "{} exceeds the image service export-size limit. "
+                "Switching to automatic raster tiling + mosaic...".format(
+                    label
+                )
+            )
+
+            aoi_extent = arcpy.Describe(aoi_native).extent
+
+            tile_rasters = clip_tile(
+                aoi_extent,
+                depth=0,
+                max_depth=8,
+            )
+
+            if not tile_rasters:
+                raise RuntimeError(
+                    "{} produced no raster tiles.".format(label)
+                )
+
+            arcpy.AddMessage(
+                "Mosaicking {} {} tile(s)...".format(
+                    len(tile_rasters),
+                    label,
+                )
+            )
+
+            mosaic_raster = register(
+                os.path.join(
+                    arcpy.env.scratchGDB,
+                    "{}_MOSAIC_{}".format(
+                        _safe_name(label),
+                        uuid.uuid4().hex[:6],
+                    ),
+                )
+            )
+
+            arcpy.management.CopyRaster(
+                tile_rasters[0],
+                mosaic_raster,
+            )
+
+            if len(tile_rasters) > 1:
+                arcpy.management.Mosaic(
+                    tile_rasters[1:],
+                    mosaic_raster,
+                )
+
+            source_raster = mosaic_raster
 
         if arcpy.Exists(output_raster):
             arcpy.management.Delete(output_raster)
 
-        source_sr = arcpy.Describe(temp_clip).spatialReference
+        source_sr = arcpy.Describe(
+            source_raster
+        ).spatialReference
 
         same_sr = (
             source_sr
@@ -1103,15 +1421,17 @@ def _download_image_service(
 
         if same_sr:
             arcpy.management.CopyRaster(
-                temp_clip,
+                source_raster,
                 output_raster,
             )
+
         else:
             arcpy.AddMessage(
                 "Projecting raster to Study Area coordinate system..."
             )
+
             arcpy.management.ProjectRaster(
-                temp_clip,
+                source_raster,
                 output_raster,
                 input_sr,
                 resampling,
@@ -1131,47 +1451,286 @@ def _download_image_service(
         except Exception:
             pass
 
-        try:
-            if arcpy.Exists(temp_clip):
-                arcpy.management.Delete(temp_clip)
-        except Exception:
-            pass
+        for item in reversed(local_temp_items):
+            delete_if_exists(item)
 
 
 # -----------------------------------------------------------------------------
 # Logging / output handling
 # -----------------------------------------------------------------------------
 
+def _source_metadata(dataset):
+    """Return authoritative source provenance for a dataset label."""
+    if dataset == "FEMA Floodplain":
+        return (
+            "Federal Emergency Management Agency (FEMA)",
+            FEMA_FLOOD_URL,
+            None,
+        )
+
+    if dataset == "NWI Wetlands":
+        return (
+            "U.S. Fish & Wildlife Service (USFWS)",
+            NWI_WETLANDS_URL,
+            None,
+        )
+
+    if dataset == "NHD Flowline":
+        return (
+            "U.S. Geological Survey (USGS)",
+            NHD_FLOWLINE_URL,
+            None,
+        )
+
+    if dataset == "NHD Waterbody":
+        return (
+            "U.S. Geological Survey (USGS)",
+            NHD_WATERBODY_URL,
+            None,
+        )
+
+    if dataset == "Census States":
+        return (
+            "U.S. Census Bureau",
+            CENSUS_STATES_URL,
+            None,
+        )
+
+    if dataset == "Census Counties":
+        return (
+            "U.S. Census Bureau",
+            CENSUS_COUNTIES_URL,
+            None,
+        )
+
+    if dataset.startswith("NLCD Land Cover "):
+        year = _trailing_year(dataset)
+        return (
+            "U.S. Geological Survey (USGS)",
+            NLCD_IMAGE_URL,
+            year,
+        )
+
+    if dataset == "USGS 3DEP Elevation":
+        return (
+            "U.S. Geological Survey (USGS)",
+            USGS_3DEP_URL,
+            None,
+        )
+
+    if dataset == "USGS 3DEP DEM 10 m":
+        return (
+            "U.S. Geological Survey (USGS)",
+            USGS_3DEP_URL,
+            None,
+        )
+
+    if dataset.startswith("USDA CDL "):
+        year = _trailing_year(dataset)
+        return (
+            "USDA National Agricultural Statistics Service (NASS)",
+            USDA_CDL_URL,
+            year,
+        )
+
+    return ("", "", None)
+
+
+def _trailing_year(text):
+    try:
+        value = str(text).strip().split()[-1]
+        year = int(value)
+        if 1900 <= year <= 2200:
+            return year
+    except Exception:
+        pass
+
+    return None
+
+
+def _qa_defaults():
+    return {
+        "qa_status": "PASS",
+        "qa_message": "",
+        "output_type": "",
+        "count": "",
+        "feature_count": None,
+        "raster_rows": None,
+        "raster_cols": None,
+        "cell_size_x": None,
+        "cell_size_y": None,
+        "band_count": None,
+        "pixel_type": "",
+        "spatial_ref": "",
+        "wkid": None,
+    }
+
+
+def _append_qa_message(meta, message):
+    if not message:
+        return
+
+    if meta["qa_message"]:
+        meta["qa_message"] += " | "
+
+    meta["qa_message"] += message
+
+
+def _set_qa_warning(meta, message):
+    if meta["qa_status"] == "PASS":
+        meta["qa_status"] = "WARN"
+
+    _append_qa_message(meta, message)
+
+
+def _inspect_output(result):
+    """Inspect a completed output and return standardized QA metadata."""
+    meta = _qa_defaults()
+
+    if not result or not arcpy.Exists(result):
+        meta["qa_status"] = "FAIL"
+        meta["qa_message"] = "Expected output does not exist."
+        return meta
+
+    try:
+        desc = arcpy.Describe(result)
+    except Exception as exc:
+        meta["qa_status"] = "WARN"
+        meta["qa_message"] = "Could not describe output: {}".format(exc)
+        return meta
+
+    # Spatial reference QA
+    try:
+        sr = desc.spatialReference
+        if sr:
+            meta["spatial_ref"] = sr.name or ""
+            factory_code = int(sr.factoryCode or 0)
+            meta["wkid"] = factory_code if factory_code > 0 else None
+
+            if not sr.name or sr.name == "Unknown":
+                _set_qa_warning(
+                    meta,
+                    "Output coordinate system is unknown.",
+                )
+        else:
+            _set_qa_warning(
+                meta,
+                "Output coordinate system could not be read.",
+            )
+    except Exception as exc:
+        _set_qa_warning(
+            meta,
+            "Spatial reference QA could not be completed: {}".format(exc),
+        )
+
+    # Vector QA
+    if hasattr(desc, "shapeType"):
+        meta["output_type"] = "FeatureClass ({})".format(
+            desc.shapeType
+        )
+
+        try:
+            feature_count = int(
+                arcpy.management.GetCount(result)[0]
+            )
+            meta["feature_count"] = feature_count
+            meta["count"] = str(feature_count)
+
+            if feature_count == 0:
+                _set_qa_warning(
+                    meta,
+                    "Output contains 0 features.",
+                )
+        except Exception as exc:
+            _set_qa_warning(
+                meta,
+                "Feature count could not be read: {}".format(exc),
+            )
+
+        return meta
+
+    # Raster QA
+    meta["output_type"] = "Raster"
+    meta["count"] = "Raster"
+
+    try:
+        raster = arcpy.Raster(result)
+
+        meta["raster_rows"] = int(raster.height)
+        meta["raster_cols"] = int(raster.width)
+        meta["cell_size_x"] = float(raster.meanCellWidth)
+        meta["cell_size_y"] = float(raster.meanCellHeight)
+        meta["band_count"] = int(raster.bandCount)
+        meta["pixel_type"] = str(raster.pixelType or "")
+
+        if meta["raster_rows"] <= 0 or meta["raster_cols"] <= 0:
+            meta["qa_status"] = "FAIL"
+            _append_qa_message(
+                meta,
+                "Raster has invalid row/column dimensions.",
+            )
+
+        if meta["cell_size_x"] <= 0 or meta["cell_size_y"] <= 0:
+            meta["qa_status"] = "FAIL"
+            _append_qa_message(
+                meta,
+                "Raster has invalid cell size.",
+            )
+
+    except Exception as exc:
+        _set_qa_warning(
+            meta,
+            "Raster properties could not be fully inspected: {}".format(exc),
+        )
+
+    return meta
+
+
 def _run_logged(dataset, log_rows, operation, outputs):
     start = datetime.datetime.now()
+
+    source_agency, source_url, requested_year = _source_metadata(dataset)
 
     try:
         result = operation()
 
-        elapsed = (
-            datetime.datetime.now() - start
-        ).total_seconds()
+        end = datetime.datetime.now()
+        elapsed = (end - start).total_seconds()
 
-        count_text = ""
+        qa = _inspect_output(result)
 
-        try:
-            desc = arcpy.Describe(result)
-            if hasattr(desc, "shapeType"):
-                count_text = str(
-                    int(arcpy.management.GetCount(result)[0])
+        if qa["qa_status"] in ("WARN", "FAIL"):
+            arcpy.AddWarning(
+                "{} QA {}: {}".format(
+                    dataset,
+                    qa["qa_status"],
+                    qa["qa_message"] or "Review output metadata.",
                 )
-            else:
-                count_text = "Raster"
-        except Exception:
-            count_text = ""
+            )
 
         log_rows.append({
             "dataset": dataset,
             "status": "SUCCESS",
+            "qa_status": qa["qa_status"],
+            "source_agency": source_agency,
+            "source_url": source_url,
+            "requested_year": requested_year,
             "output": result or "",
-            "count": count_text,
+            "output_type": qa["output_type"],
+            "count": qa["count"],
+            "feature_count": qa["feature_count"],
+            "raster_rows": qa["raster_rows"],
+            "raster_cols": qa["raster_cols"],
+            "cell_size_x": qa["cell_size_x"],
+            "cell_size_y": qa["cell_size_y"],
+            "band_count": qa["band_count"],
+            "pixel_type": qa["pixel_type"],
+            "spatial_ref": qa["spatial_ref"],
+            "wkid": qa["wkid"],
             "seconds": elapsed,
             "message": "",
+            "qa_message": qa["qa_message"],
+            "acquired_utc": datetime.datetime.utcnow(),
         })
 
         if result:
@@ -1194,14 +1753,31 @@ def _run_logged(dataset, log_rows, operation, outputs):
         log_rows.append({
             "dataset": dataset,
             "status": "FAILED",
+            "qa_status": "NOT_RUN",
+            "source_agency": source_agency,
+            "source_url": source_url,
+            "requested_year": requested_year,
             "output": "",
+            "output_type": "",
             "count": "",
+            "feature_count": None,
+            "raster_rows": None,
+            "raster_cols": None,
+            "cell_size_x": None,
+            "cell_size_y": None,
+            "band_count": None,
+            "pixel_type": "",
+            "spatial_ref": "",
+            "wkid": None,
             "seconds": elapsed,
             "message": message[:2000],
+            "qa_message": "Output QA was not run because acquisition failed.",
+            "acquired_utc": datetime.datetime.utcnow(),
         })
 
 
-def _write_log(output_table, rows):
+def _write_log(output_table, rows, run_id):
+    """Create a dataset-level provenance and QA table for the current run."""
     if arcpy.Exists(output_table):
         arcpy.management.Delete(output_table)
 
@@ -1211,17 +1787,35 @@ def _write_log(output_table, rows):
     )
 
     fields = [
+        ("RUN_ID", "TEXT", 16),
         ("DATASET", "TEXT", 100),
         ("STATUS", "TEXT", 20),
+        ("QA_STATUS", "TEXT", 20),
+        ("SOURCE_AGENCY", "TEXT", 150),
+        ("SOURCE_URL", "TEXT", 1000),
+        ("REQUEST_YEAR", "LONG", None),
         ("OUTPUT", "TEXT", 500),
+        ("OUTPUT_TYPE", "TEXT", 50),
         ("COUNT", "TEXT", 50),
+        ("FEATURE_COUNT", "LONG", None),
+        ("RASTER_ROWS", "LONG", None),
+        ("RASTER_COLS", "LONG", None),
+        ("CELL_SIZE_X", "DOUBLE", None),
+        ("CELL_SIZE_Y", "DOUBLE", None),
+        ("BAND_COUNT", "LONG", None),
+        ("PIXEL_TYPE", "TEXT", 50),
+        ("SPATIAL_REF", "TEXT", 255),
+        ("WKID", "LONG", None),
         ("RUNTIME_SEC", "DOUBLE", None),
         ("MESSAGE", "TEXT", 2000),
+        ("QA_MESSAGE", "TEXT", 1000),
+        ("ACQUIRED_UTC", "DATE", None),
         ("RUN_DATE", "DATE", None),
     ]
 
     for name, field_type, length in fields:
         kwargs = {}
+
         if length:
             kwargs["field_length"] = length
 
@@ -1232,28 +1826,475 @@ def _write_log(output_table, rows):
             **kwargs
         )
 
+    insert_fields = [
+        "RUN_ID",
+        "DATASET",
+        "STATUS",
+        "QA_STATUS",
+        "SOURCE_AGENCY",
+        "SOURCE_URL",
+        "REQUEST_YEAR",
+        "OUTPUT",
+        "OUTPUT_TYPE",
+        "COUNT",
+        "FEATURE_COUNT",
+        "RASTER_ROWS",
+        "RASTER_COLS",
+        "CELL_SIZE_X",
+        "CELL_SIZE_Y",
+        "BAND_COUNT",
+        "PIXEL_TYPE",
+        "SPATIAL_REF",
+        "WKID",
+        "RUNTIME_SEC",
+        "MESSAGE",
+        "QA_MESSAGE",
+        "ACQUIRED_UTC",
+        "RUN_DATE",
+    ]
+
     with arcpy.da.InsertCursor(
         output_table,
-        [
-            "DATASET",
-            "STATUS",
-            "OUTPUT",
-            "COUNT",
-            "RUNTIME_SEC",
-            "MESSAGE",
-            "RUN_DATE",
-        ],
+        insert_fields,
     ) as cursor:
         for row in rows:
             cursor.insertRow([
+                run_id,
                 row["dataset"],
                 row["status"],
+                row["qa_status"],
+                row["source_agency"],
+                row["source_url"],
+                row["requested_year"],
                 row["output"],
+                row["output_type"],
                 row["count"],
+                row["feature_count"],
+                row["raster_rows"],
+                row["raster_cols"],
+                row["cell_size_x"],
+                row["cell_size_y"],
+                row["band_count"],
+                row["pixel_type"],
+                row["spatial_ref"],
+                row["wkid"],
                 row["seconds"],
                 row["message"],
+                row["qa_message"],
+                row["acquired_utc"],
                 datetime.datetime.now(),
             ])
+
+
+
+def _report_value(value):
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _report_count_detail(row):
+    if row.get("feature_count") is not None:
+        return "{:,} features".format(int(row["feature_count"]))
+
+    if (
+        row.get("raster_rows") is not None
+        and row.get("raster_cols") is not None
+    ):
+        detail = "{:,} x {:,} cells".format(
+            int(row["raster_cols"]),
+            int(row["raster_rows"]),
+        )
+
+        if (
+            row.get("cell_size_x") is not None
+            and row.get("cell_size_y") is not None
+        ):
+            detail += " | cell {:.4g} x {:.4g}".format(
+                float(row["cell_size_x"]),
+                float(row["cell_size_y"]),
+            )
+
+        return detail
+
+    return row.get("count") or ""
+
+
+def _write_run_reports(
+    output_folder,
+    output_gdb,
+    run_id,
+    study_area,
+    buffer_distance,
+    rows,
+):
+    """
+    Write a human-readable HTML QA report and machine-readable CSV manifest.
+
+    Both files summarize the same dataset-level provenance and QA information
+    stored in Data_Acquisition_Log.
+    """
+    report_html = os.path.join(
+        output_folder,
+        "Data_Acquisition_Report.html",
+    )
+    manifest_csv = os.path.join(
+        output_folder,
+        "Data_Acquisition_Manifest.csv",
+    )
+
+    csv_fields = [
+        "RUN_ID",
+        "DATASET",
+        "STATUS",
+        "QA_STATUS",
+        "SOURCE_AGENCY",
+        "SOURCE_URL",
+        "REQUEST_YEAR",
+        "OUTPUT",
+        "OUTPUT_TYPE",
+        "COUNT_DETAIL",
+        "FEATURE_COUNT",
+        "RASTER_ROWS",
+        "RASTER_COLS",
+        "CELL_SIZE_X",
+        "CELL_SIZE_Y",
+        "BAND_COUNT",
+        "PIXEL_TYPE",
+        "SPATIAL_REF",
+        "WKID",
+        "RUNTIME_SEC",
+        "MESSAGE",
+        "QA_MESSAGE",
+        "ACQUIRED_UTC",
+    ]
+
+    with open(
+        manifest_csv,
+        "w",
+        newline="",
+        encoding="utf-8-sig",
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=csv_fields,
+        )
+        writer.writeheader()
+
+        for row in rows:
+            writer.writerow({
+                "RUN_ID": run_id,
+                "DATASET": row.get("dataset", ""),
+                "STATUS": row.get("status", ""),
+                "QA_STATUS": row.get("qa_status", ""),
+                "SOURCE_AGENCY": row.get("source_agency", ""),
+                "SOURCE_URL": row.get("source_url", ""),
+                "REQUEST_YEAR": _report_value(row.get("requested_year")),
+                "OUTPUT": row.get("output", ""),
+                "OUTPUT_TYPE": row.get("output_type", ""),
+                "COUNT_DETAIL": _report_count_detail(row),
+                "FEATURE_COUNT": _report_value(row.get("feature_count")),
+                "RASTER_ROWS": _report_value(row.get("raster_rows")),
+                "RASTER_COLS": _report_value(row.get("raster_cols")),
+                "CELL_SIZE_X": _report_value(row.get("cell_size_x")),
+                "CELL_SIZE_Y": _report_value(row.get("cell_size_y")),
+                "BAND_COUNT": _report_value(row.get("band_count")),
+                "PIXEL_TYPE": row.get("pixel_type", ""),
+                "SPATIAL_REF": row.get("spatial_ref", ""),
+                "WKID": _report_value(row.get("wkid")),
+                "RUNTIME_SEC": "{:.2f}".format(
+                    float(row.get("seconds") or 0)
+                ),
+                "MESSAGE": row.get("message", ""),
+                "QA_MESSAGE": row.get("qa_message", ""),
+                "ACQUIRED_UTC": (
+                    row["acquired_utc"].isoformat(sep=" ")
+                    if row.get("acquired_utc")
+                    else ""
+                ),
+            })
+
+    success_count = sum(
+        1 for row in rows
+        if row.get("status") == "SUCCESS"
+    )
+    failed_count = sum(
+        1 for row in rows
+        if row.get("status") == "FAILED"
+    )
+    qa_warn_count = sum(
+        1 for row in rows
+        if row.get("qa_status") == "WARN"
+    )
+    qa_fail_count = sum(
+        1 for row in rows
+        if row.get("qa_status") == "FAIL"
+    )
+
+    generated = datetime.datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    html_rows = []
+
+    for row in rows:
+        status = row.get("status", "")
+        qa_status = row.get("qa_status", "")
+
+        status_class = (
+            "success" if status == "SUCCESS" else "failed"
+        )
+
+        if qa_status == "PASS":
+            qa_class = "success"
+        elif qa_status == "WARN":
+            qa_class = "warning"
+        elif qa_status == "FAIL":
+            qa_class = "failed"
+        else:
+            qa_class = "neutral"
+
+        source_url = row.get("source_url", "")
+        source_cell = html.escape(
+            row.get("source_agency", "") or ""
+        )
+
+        if source_url:
+            source_cell += (
+                '<br><a href="{0}">Service</a>'.format(
+                    html.escape(
+                        source_url,
+                        quote=True,
+                    )
+                )
+            )
+
+        note = row.get("message", "") or row.get(
+            "qa_message",
+            "",
+        )
+
+        html_rows.append(
+            """
+            <tr>
+              <td>{dataset}</td>
+              <td><span class="badge {status_class}">{status}</span></td>
+              <td><span class="badge {qa_class}">{qa}</span></td>
+              <td>{source}</td>
+              <td>{year}</td>
+              <td>{output_type}</td>
+              <td>{detail}</td>
+              <td>{crs}</td>
+              <td>{runtime}</td>
+              <td>{note}</td>
+            </tr>
+            """.format(
+                dataset=html.escape(
+                    row.get("dataset", "") or ""
+                ),
+                status_class=status_class,
+                status=html.escape(status),
+                qa_class=qa_class,
+                qa=html.escape(qa_status),
+                source=source_cell,
+                year=html.escape(
+                    _report_value(
+                        row.get("requested_year")
+                    )
+                ),
+                output_type=html.escape(
+                    row.get("output_type", "") or ""
+                ),
+                detail=html.escape(
+                    _report_count_detail(row)
+                ),
+                crs=html.escape(
+                    row.get("spatial_ref", "") or ""
+                ),
+                runtime="{:.1f}s".format(
+                    float(row.get("seconds") or 0)
+                ),
+                note=html.escape(note or ""),
+            )
+        )
+
+    page = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Automated GIS Data Acquisition Report</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body {{
+    font-family: Arial, Helvetica, sans-serif;
+    margin: 32px;
+    color: #1f2937;
+    background: #ffffff;
+}}
+h1 {{
+    margin-bottom: 4px;
+}}
+.subtitle {{
+    color: #4b5563;
+    margin-top: 0;
+}}
+.meta {{
+    background: #f8fafc;
+    border: 1px solid #e5e7eb;
+    padding: 14px 18px;
+    border-radius: 8px;
+    margin: 20px 0;
+}}
+.cards {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 18px 0 24px;
+}}
+.card {{
+    min-width: 150px;
+    padding: 14px 18px;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+}}
+.card strong {{
+    display: block;
+    font-size: 24px;
+}}
+table {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}}
+th, td {{
+    border: 1px solid #e5e7eb;
+    padding: 8px;
+    text-align: left;
+    vertical-align: top;
+}}
+th {{
+    background: #f3f4f6;
+}}
+.badge {{
+    display: inline-block;
+    padding: 3px 7px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+}}
+.success {{
+    background: #dcfce7;
+    color: #166534;
+}}
+.warning {{
+    background: #fef3c7;
+    color: #92400e;
+}}
+.failed {{
+    background: #fee2e2;
+    color: #991b1b;
+}}
+.neutral {{
+    background: #e5e7eb;
+    color: #374151;
+}}
+.footer {{
+    color: #6b7280;
+    font-size: 12px;
+    margin-top: 24px;
+}}
+a {{
+    color: #2563eb;
+}}
+</style>
+</head>
+<body>
+
+<h1>Automated GIS Data Acquisition</h1>
+<p class="subtitle">Acquisition, provenance, and QA report</p>
+
+<div class="meta">
+<strong>Run ID:</strong> {run_id}<br>
+<strong>Generated:</strong> {generated}<br>
+<strong>Study Area:</strong> {study_area}<br>
+<strong>Buffer:</strong> {buffer_distance}<br>
+<strong>Output Geodatabase:</strong> {output_gdb}
+</div>
+
+<div class="cards">
+<div class="card"><strong>{success}</strong>Successful</div>
+<div class="card"><strong>{failed}</strong>Failed</div>
+<div class="card"><strong>{warn}</strong>QA Warnings</div>
+<div class="card"><strong>{qa_fail}</strong>QA Failures</div>
+</div>
+
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Status</th>
+<th>QA</th>
+<th>Source</th>
+<th>Year</th>
+<th>Output Type</th>
+<th>Feature/Raster Detail</th>
+<th>CRS</th>
+<th>Runtime</th>
+<th>Message</th>
+</tr>
+</thead>
+<tbody>
+{rows}
+</tbody>
+</table>
+
+<p class="footer">
+Dinesh Shrestha — GIS Automation &amp; Spatial Analysis Consultant |
+ArcGIS Pro • Python • ArcPy • Data Engineering<br>
+dinesh.shrestha015@gmail.com |
+dineshrestha.github.io
+</p>
+
+</body>
+</html>
+""".format(
+        run_id=html.escape(run_id),
+        generated=html.escape(generated),
+        study_area=html.escape(
+            study_area or ""
+        ),
+        buffer_distance=html.escape(
+            buffer_distance or ""
+        ),
+        output_gdb=html.escape(
+            output_gdb or ""
+        ),
+        success=success_count,
+        failed=failed_count,
+        warn=qa_warn_count,
+        qa_fail=qa_fail_count,
+        rows="\n".join(html_rows),
+    )
+
+    with open(
+        report_html,
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        handle.write(page)
+
+    arcpy.AddMessage(
+        "HTML QA report created: {}".format(
+            report_html
+        )
+    )
+    arcpy.AddMessage(
+        "CSV acquisition manifest created: {}".format(
+            manifest_csv
+        )
+    )
+
+    return report_html, manifest_csv
 
 
 def _add_outputs_to_map(outputs, log_table):

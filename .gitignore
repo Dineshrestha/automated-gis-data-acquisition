@@ -1,76 +1,12 @@
-# Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-.venv/
-venv/
-env/
-.env
-
-# Jupyter
-.ipynb_checkpoints/
-
-# IDE / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-
-# Build / packaging
-build/
-dist/
-*.egg-info/
-
-# Logs and temp files
-*.log
-*.tmp
-*.temp
-~$*
-
-# ArcGIS locks and indexes
 *.lock
-*.sr.lock
-*.freelist
-
-# File geodatabases and mobile geodatabases
+*.tmp
+*.bak
 *.gdb/
-*.geodatabase
-
-# Large/local GIS datasets
-*.tif
-*.tiff
-*.img
-*.jp2
-*.sid
-*.las
-*.laz
-*.shp
-*.shx
-*.dbf
-*.prj
-*.cpg
-*.sbn
-*.sbx
-*.xml
-*.kmz
-*.kml
-
-# Local downloads / scratch / outputs
-downloads/
-scratch/
-temp/
-tmp/
-output/
-outputs/
-data/raw/
-data/processed/
-
-# ArcGIS Pro project backups/history
-*.aprx.bak
-*_Backup/
