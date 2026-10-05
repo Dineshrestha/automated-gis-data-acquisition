@@ -60,6 +60,14 @@ from automated_gis_data_acquisition.core.rest_client import (
     format_arcgis_error as _arcgis_error_text,
 )
 
+from automated_gis_data_acquisition.core.aoi import (
+    prepare_aoi,
+)
+
+from automated_gis_data_acquisition.core.projection import (
+    project_feature_class,
+)
+
 
 FEMA_LAYER_URL = "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28"
 FEMA_QUERY_URL = FEMA_LAYER_URL + "/query"
@@ -254,49 +262,39 @@ class DownloadFEMAFloodplain(object):
                     "Study Area has an unknown coordinate system. Define its projection first."
                 )
 
-            buffer_value = _linear_unit_value(buffer_distance)
-            if desc.shapeType != "Polygon" and buffer_value <= 0:
-                raise arcpy.ExecuteError(
-                    "A Point/Polyline study area requires a buffer greater than 0 so FEMA polygons "
-                    "can be clipped to an area. Use a positive Buffer Distance."
-                )
-
-            # Build one dissolved polygon AOI in the study area's native CRS.
+            # Build one dissolved polygon AOI in the study area's native CRS
+            # using the shared acquisition-engine AOI helper.
             aoi_native = tmp_fc("FEMA_AOI")
-            if buffer_value > 0:
-                arcpy.AddMessage("Creating {} buffer around study area...".format(buffer_distance))
-                arcpy.analysis.PairwiseBuffer(
-                    study_area,
-                    aoi_native,
-                    buffer_distance,
-                    dissolve_option="ALL",
-                )
-            else:
-                arcpy.management.Dissolve(study_area, aoi_native)
+            arcpy.AddMessage(
+                "Preparing study area AOI using shared core helper..."
+            )
 
-            if int(arcpy.management.GetCount(aoi_native)[0]) == 0:
-                raise arcpy.ExecuteError("Study Area contains no usable features.")
+            prepare_aoi(
+                study_area=study_area,
+                buffer_distance=buffer_distance,
+                output_fc=aoi_native,
+            )
 
-            # Project AOI to FEMA's native coordinate system for REST query + exact clip.
+            # Project AOI to FEMA's native coordinate system for REST query
+            # and exact clipping using the shared projection helper.
             fema_sr = arcpy.SpatialReference(FEMA_SR_WKID)
             aoi_fema = tmp_fc("FEMA_AOI_4269")
-            transformation = ""
-            try:
-                transformations = arcpy.ListTransformations(input_sr, fema_sr)
-                if transformations:
-                    transformation = transformations[0]
-            except Exception:
-                transformation = ""
 
             if input_sr.factoryCode == FEMA_SR_WKID:
-                arcpy.management.CopyFeatures(aoi_native, aoi_fema)
-            else:
-                arcpy.AddMessage("Projecting query AOI to FEMA NAD83 geographic coordinates...")
-                arcpy.management.Project(
+                arcpy.management.CopyFeatures(
                     aoi_native,
                     aoi_fema,
-                    fema_sr,
-                    transformation,
+                )
+            else:
+                arcpy.AddMessage(
+                    "Projecting query AOI to FEMA NAD83 geographic coordinates "
+                    "using shared core helper..."
+                )
+
+                project_feature_class(
+                    input_fc=aoi_native,
+                    output_fc=aoi_fema,
+                    target_sr=fema_sr,
                 )
 
             extent = arcpy.Describe(aoi_fema).extent
@@ -503,23 +501,26 @@ class DownloadFEMAFloodplain(object):
                 else:
                     # Deliver output in the study area's coordinate system.
                     if input_sr.factoryCode == FEMA_SR_WKID:
-                        arcpy.management.CopyFeatures(clipped_4269, final_output)
-                    else:
-                        out_transform = ""
-                        try:
-                            trans = arcpy.ListTransformations(fema_sr, input_sr)
-                            if trans:
-                                out_transform = trans[0]
-                        except Exception:
-                            out_transform = ""
-                        arcpy.AddMessage("Projecting final floodplain to the Study Area coordinate system...")
-                        arcpy.management.Project(
+                        arcpy.management.CopyFeatures(
                             clipped_4269,
                             final_output,
-                            input_sr,
-                            out_transform,
                         )
-                    arcpy.management.RepairGeometry(final_output, "DELETE_NULL")
+                    else:
+                        arcpy.AddMessage(
+                            "Projecting final floodplain to the Study Area coordinate "
+                            "system using shared core helper..."
+                        )
+
+                        project_feature_class(
+                            input_fc=clipped_4269,
+                            output_fc=final_output,
+                            target_sr=input_sr,
+                        )
+
+                    arcpy.management.RepairGeometry(
+                        final_output,
+                        "DELETE_NULL",
+                    )
 
             final_count = int(arcpy.management.GetCount(final_output)[0])
             arcpy.AddMessage("Final clipped features: {:,}".format(final_count))
@@ -567,16 +568,6 @@ class DownloadFEMAFloodplain(object):
                         arcpy.management.Delete(item)
                 except Exception:
                     pass
-
-
-def _linear_unit_value(text):
-    """Return numeric part of a GPLinearUnit text value."""
-    if not text:
-        return 0.0
-    try:
-        return float(str(text).strip().split()[0])
-    except Exception:
-        return 0.0
 
 
 def _field_lookup(feature_class):
