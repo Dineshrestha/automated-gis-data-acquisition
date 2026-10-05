@@ -1,4 +1,11 @@
 # -*- coding: utf-8 -*-
+# -----------------------------------------------------------------------------
+# Dinesh Shrestha
+# GIS Automation & Spatial Analysis Consultant
+# ArcGIS Pro • Python • ArcPy • Data Engineering
+# email: dinesh.shrestha015@gmail.com
+# Portfolio: dineshrestha.github.io
+# -----------------------------------------------------------------------------
 """
 FEMA Floodplain Downloader - ArcGIS Pro Python Toolbox
 
@@ -7,19 +14,51 @@ Downloads FEMA National Flood Hazard Layer (NFHL) Flood Hazard Zones
 study area, filters flood hazards, clips the data exactly to the AOI, and
 writes a local feature class plus an optional summary table.
 
-Designed for ArcGIS Pro / Python 3 with ArcPy. No third-party Python package
-is required; web requests use Python's standard library.
+Designed for ArcGIS Pro / Python 3 with ArcPy. Shared REST networking and
+retry logic are provided by the Automated GIS Data Acquisition core package.
 """
 
 import arcpy
 import os
+import sys
 import json
-import time
 import uuid
-import urllib.parse
-import urllib.request
 import urllib.error
 from collections import defaultdict
+
+
+# -----------------------------------------------------------------------------
+# Local project package
+# -----------------------------------------------------------------------------
+# Toolbox location:
+#   toolboxes/fema/FEMA_Floodplain_Downloader.pyt
+#
+# Shared package location:
+#   src/automated_gis_data_acquisition/
+#
+# Add the repository's src folder to sys.path so ArcGIS Pro can import the
+# reusable acquisition-engine modules without installing the package.
+# -----------------------------------------------------------------------------
+
+TOOLBOX_DIR = os.path.dirname(os.path.abspath(__file__))
+
+PROJECT_SRC = os.path.abspath(
+    os.path.join(
+        TOOLBOX_DIR,
+        "..",
+        "..",
+        "src",
+    )
+)
+
+if PROJECT_SRC not in sys.path:
+    sys.path.insert(0, PROJECT_SRC)
+
+
+from automated_gis_data_acquisition.core.rest_client import (
+    post_json as _request_json,
+    format_arcgis_error as _arcgis_error_text,
+)
 
 
 FEMA_LAYER_URL = "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28"
@@ -528,47 +567,6 @@ class DownloadFEMAFloodplain(object):
                         arcpy.management.Delete(item)
                 except Exception:
                     pass
-
-
-def _request_json(url, params, timeout=120, retries=3):
-    """POST to an ArcGIS REST endpoint and return decoded JSON."""
-    data = urllib.parse.urlencode(params).encode("utf-8")
-    headers = {
-        "User-Agent": "ArcGISPro-FEMA-Floodplain-Downloader/1.1",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
-    }
-    last_error = None
-    for attempt in range(1, retries + 1):
-        try:
-            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                text = response.read().decode("utf-8")
-            result = json.loads(text)
-            # Retry transient ArcGIS Server errors when sensible.
-            if isinstance(result, dict) and "error" in result:
-                code = result["error"].get("code")
-                if code in (429, 500, 502, 503, 504) and attempt < retries:
-                    time.sleep(2 ** attempt)
-                    continue
-            return result
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as ex:
-            last_error = ex
-            if attempt >= retries:
-                raise
-            time.sleep(2 ** attempt)
-    raise last_error
-
-
-def _arcgis_error_text(error):
-    code = error.get("code", "Unknown")
-    message = error.get("message", "ArcGIS REST error")
-    details = error.get("details") or []
-    return "FEMA REST error {}: {}{}".format(
-        code,
-        message,
-        " | " + " | ".join(details) if details else "",
-    )
 
 
 def _linear_unit_value(text):
