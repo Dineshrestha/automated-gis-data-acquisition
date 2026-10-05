@@ -134,6 +134,7 @@ Project_Environmental_Data.gdb
 - Projection back to the study-area coordinate system
 - Raster acquisition from ArcGIS ImageServer services
 - DEM / raster clipping and reprojection
+- Automatic raster tiling and mosaic fallback when ImageServer export limits are exceeded
 - Dedicated 10 m DEM output
 - Failure isolation between providers
 - Optional add-to-map behavior
@@ -169,7 +170,7 @@ Failed batches are recursively subdivided until they succeed or reach the config
 
 Raster datasets are acquired from public ArcGIS ImageServer services.
 
-For elevation and land-cover datasets, the workflow is:
+For normal-sized requests, the workflow is:
 
 ```text
 Image Service
@@ -181,11 +182,37 @@ Server-side source mosaic
 Clip to AOI
      |
      v
-Project to study-area CRS
+Project to Study Area CRS
      |
      v
 Single output raster
 ```
+
+For large AOIs, the toolbox automatically switches to a tiled workflow when the ImageServer export-size limit is exceeded:
+
+```text
+Large raster request
+        |
+        v
+ImageServer size limit
+        |
+        v
+Automatic AOI subdivision
+        |
+        v
+Download smaller raster tiles
+        |
+        v
+Mosaic tiles
+        |
+        v
+Project to Study Area CRS
+        |
+        v
+Final raster
+```
+
+This large-raster fallback was successfully tested on a B2H-style study area with a 20-mile buffer. The USGS 3DEP request exceeded the service's 8000 × 8000 export limit, was automatically split into four tiles, mosaicked, projected, and completed successfully.
 
 The dedicated **USGS DEM 10 m** option targets an approximately 10-meter output cell size and converts that distance into the study-area coordinate system's map units when necessary.
 
