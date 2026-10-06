@@ -1,6 +1,6 @@
 # Automated GIS Data Acquisition
 
-> Turn a project study area into a project-ready GIS data package by automating acquisition, clipping, projection, standardization, logging, QA, and delivery of authoritative public GIS datasets.
+> **Download only what your project needs.** Define a study area, choose the datasets, and let the toolbox acquire, clip, project, QA, document, and package authoritative GIS data for that project area.
 
 ![ArcGIS Pro](https://img.shields.io/badge/ArcGIS%20Pro-Python%20Toolbox-blue)
 ![Python](https://img.shields.io/badge/Python-3.x-blue)
@@ -8,11 +8,58 @@
 
 ![Automated GIS Data Acquisition](docs/images/automated_gis_data_acquisition_banner.png)
 
-## Overview
+## The problem
 
-Environmental and infrastructure GIS projects repeatedly require analysts to visit multiple public-data portals, identify the correct dataset, download it, clip it to a study area, project it, organize outputs, and document what was acquired.
+Starting a GIS project often means downloading a large countywide, statewide, or national dataset even though the project uses only a small portion of it.
 
-**Automated GIS Data Acquisition** consolidates that workflow into a single ArcGIS Pro Python toolbox.
+That creates a familiar chain of unnecessary work:
+
+- download much more data than the project actually needs
+- store large source datasets locally
+- clip, buffer, reproject, and clean the data afterward
+- repeat the same process across multiple public-data portals
+- spend processing time and disk space on features or raster cells that will never be used
+
+For large infrastructure and environmental projects, that overhead can become substantial.
+
+## The solution
+
+**Automated GIS Data Acquisition** reverses that workflow.
+
+Instead of downloading the full source dataset first, you begin with the **project study area**. The toolbox connects directly to authoritative public GIS services, requests data relevant to that area, clips the result to the AOI, projects it to the project coordinate system, and organizes the outputs automatically.
+
+```text
+Traditional workflow
+
+Download large source dataset
+        ↓
+Store locally
+        ↓
+Clip / Buffer / Project
+        ↓
+Remove unnecessary data
+        ↓
+Project-ready dataset
+
+
+Automated GIS Data Acquisition
+
+Define project area
+        ↓
+Select required datasets
+        ↓
+Query authoritative GIS services
+        ↓
+Acquire project-area data
+        ↓
+Clip / Project / QA automatically
+        ↓
+Project-ready geodatabase
+```
+
+The result is less unnecessary data, less manual preprocessing, lower storage overhead, and a repeatable way to start a GIS project with the datasets you actually need.
+
+This is not just a download tool. It is a **project data-acquisition and preprocessing workflow** designed to solve one of the most repetitive problems in GIS project setup.
 
 ## Current release
 
@@ -143,7 +190,7 @@ Project to Study Area CRS
 Final raster
 ```
 
-This large-raster fallback was successfully tested on a B2H-style study area with a 20-mile buffer. A USGS 3DEP request exceeded the service's 8000 × 8000 export limit, was automatically split into four tiles, mosaicked, projected, and completed successfully.
+This large-raster fallback was successfully tested on a large study area with a 20-mile buffer. A USGS 3DEP request exceeded the service's 8000 × 8000 export limit, was automatically split into four tiles, mosaicked, projected, and completed successfully.
 
 The dedicated **USGS DEM 10 m** option targets an approximately 10-meter output cell size and converts that distance into the Study Area coordinate system's map units when necessary.
 
@@ -192,7 +239,7 @@ The HTML report provides a human-readable project acquisition and QA summary. Th
 - FEMA large-area acquisition validated
 - NWI large-area acquisition validated
 - NHD Flowline optimized with actual-AOI querying and 125-ID batches
-- NHD Flowline 10-mile B2H-style test: 2,695 features acquired in 3m 57s with no 504 batch failures
+- NHD Flowline 20-mile test: 5,635 features acquired in 5m 20s with no batch timeout failures
 - NLCD acquisition validated
 - 3DEP large-raster tiling and mosaic fallback validated
 - USGS DEM 10 m large-raster tiling and mosaic fallback validated
